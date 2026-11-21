@@ -2,6 +2,7 @@
 import gzip, json, math, os, heapq, time
 from array import array
 
+DET = bool(os.environ.get('MECH_DET'))
 DIRS = [(1, 0), (1, 1), (0, 1), (-1, 1), (-1, 0), (-1, -1), (0, -1), (1, -1)]
 DLEN = [1.0, 1.4142, 1.0, 1.4142, 1.0, 1.4142, 1.0, 1.4142]
 
@@ -160,13 +161,17 @@ class AStar:
         return (max(dx, dy) + 0.4142 * min(dx, dy))
 
     def step(self, budget_s):
+        if DET:
+            return self.step_n(int(budget_s * 40000))
+        return self.step_n(10 ** 9, time.perf_counter() + budget_s)
+
+    def step_n(self, max_it, t_end=None):
         m = self.m; NX = m.NX; S = m.S; E = m.E; edges = m.edges
-        t_end = time.perf_counter() + budget_s
         op = self.open; g = self.g; par = self.par; closed = self.closed
         it = 0
         while op:
             it += 1
-            if (it & 63) == 0 and time.perf_counter() > t_end:
+            if it > max_it or ((it & 63) == 0 and t_end is not None and time.perf_counter() > t_end):
                 return False
             f, gc, c = heapq.heappop(op)
             if c in closed:
