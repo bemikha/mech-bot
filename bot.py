@@ -1,7 +1,9 @@
 """Mech Royale bot v2: laser sniper that keeps house bots at long range, camps the zone edge
 away from enemies, farms cubes early, and breaks line of sight when focused."""
 import math, random, sys, time, os
-F = set(os.environ.get("FLAGS", "patrol,nohide").split(","))
+F = set(os.environ.get("FLAGS", "patrol,nohide,zfix").split(","))
+E = lambda k, d: float(os.environ.get(k, d))
+PFRAC = E("PFRAC", 0.52); PSPD = E("PSPD", 0.043); FARMT = E("FARMT", 150); FARMC = E("FARMC", 6); TRL = E("TRL", 220); TRN = E("TRN", 180); NL = E("NL", 150); NN = E("NN", 105); KW = E("KW", 1.0); WOUND = E("WOUND", 0.62); AVR = E("AVR", 130); AVW = E("AVW", 0.8)
 import mechfight as mf
 from geo import Map, AStar, DET
 
@@ -26,7 +28,7 @@ def ang(a, b):
 
 
 class Bot:
-    name = "comet-patrol"
+    name = "comet-v4"
 
     def __init__(self, hello):
         self.cfg = hello['config']
@@ -176,7 +178,7 @@ class Bot:
     # ---------------------------------------------------------------- targets
     def choose_target(self, obs, me, enemies, muzzle, wounded, urgent, sniping):
         t = obs['t']; pos = me['pos']
-        cand = [e for e in enemies if d2(pos, e['pos']) < (150 if sniping else 90)
+        cand = [e for e in enemies if d2(pos, e['pos']) < (TRL if sniping else TRN)
                 or t - self.attackers.get(e['id'], -99) < 6 or e.get('hp', 1400) < 450
                 or (e['id'] == self.target_id and d2(pos, e['pos']) < 130)]
         if not any(d2(pos, e['pos']) < 60 for e in cand):
@@ -197,7 +199,7 @@ class Bot:
         if wounded or urgent or (cand and d2(pos, cand[0]['pos']) < 85):
             return cand[0] if cand else None
         farm = [m for m in obs['mechs'] if m['kind'] == 'npc' and d2(pos, m['pos']) < 77]
-        reach = 110 if t < 150 and me['cubes'] < 6 else 62
+        reach = 110 if t < FARMT and me['cubes'] < FARMC else 62
         farm += [dict(c, kind='crate') for c in obs['crates'] if d2(pos, c['pos']) < reach]
         farm.sort(key=lambda it: d2(pos, it['pos']) - 17 * (it.get('kind') == 'npc') - 14 * (it['id'] == self.target_id))
         for it in farm[:6]:
@@ -253,8 +255,8 @@ class Bot:
         lig_i = kinds.index('lightning') if 'lightning' in kinds else None
         mort_i = kinds.index('mortar') if 'mortar' in kinds else None
         sniping = laser_i is not None
-        nearby = [e for e in enemies if d2(pos, e['pos']) < (150 if sniping else 105)]
-        wounded = me['hp'] < 0.62 * me['max_hp']
+        nearby = [e for e in enemies if d2(pos, e['pos']) < (NL if sniping else NN)]
+        wounded = me['hp'] < WOUND * me['max_hp']
         h_me = st.get('height', 9)
         muzzle = (px, py, pz + st.get('muzzle_height', 7))
         eye_me = (px, py, pz + h_me * 0.5)
@@ -323,7 +325,7 @@ class Bot:
         tdist = d2(pos, target['pos']) if target else 1e9
         finishing = tkind == 'mech' and not wounded and len(nearby) <= 1 and tdist < 95 and target.get('hp', 1e9) < me['hp'] * 0.43
         opening = t < 65 and me['cubes'] < 5
-        farm_window = t < 150 and me['cubes'] < 6 and not any(d2(pos, e['pos']) < 90 for e in enemies)
+        farm_window = t < FARMT and me['cubes'] < FARMC and not any(d2(pos, e['pos']) < 90 for e in enemies)
 
         # ---------------- goal selection
         goal = None; stop_r = 0; laser_run = False
@@ -333,8 +335,8 @@ class Bot:
                 self.camp = self.pick_camp(obs, me, self.enemy_seen); self.camp_key = zk; self.camp_t = t
         goal = self.camp
         if 'patrol' in F:
-            a_ = self.phase + t * 0.043
-            goal = (nc[0] + math.cos(a_) * nr * 0.52, nc[1] + math.sin(a_) * nr * 0.52)
+            a_ = self.phase + t * PSPD
+            goal = (nc[0] + math.cos(a_) * nr * PFRAC, nc[1] + math.sin(a_) * nr * PFRAC)
         stop_r = min(3.0, max(0.5, nr * 0.2))
         if urgent:
             goal = self.camp if d2(self.camp, nc) < nr else nc
@@ -414,13 +416,23 @@ class Bot:
                 w *= 0.35
             if hiding:
                 w *= 0.5
-            pressure.append((ang(pos, e['pos']), w))
+            if 'zfix' in F and (not me['in_zone'] or d2(pos, cc) > cr - 8):
+                w *= 0.25
+            pressure.append((ang(pos, e['pos']), w * KW))
+        if 'avoid' in F:
+            ids = {e['id'] for e in nearby}
+            for e in enemies:
+                d = d2(pos, e['pos'])
+                if e['id'] not in ids and d < AVR:
+                    pressure.append((ang(pos, e['pos']), AVW * (1 - d / AVR)))
         best = -1e9; heading = wanted
         side = 1 if math.sin(self.phase + t * 1.6) >= 0 else -1
         for i in range(16):
             th = wanted + i * TAU / 16
             dx, dy = math.cos(th), math.sin(th)
             s = math.cos(th - wanted) * (3.8 if (urgent or hiding) else 1.25)
+            if 'zfix' in F and not me['in_zone']:
+                s += math.cos(th - ang(pos, cc)) * 6.0
             s += 0.28 * math.cos(th - self.heading)
             for b, w in pressure:
                 s -= math.cos(th - b) * w
