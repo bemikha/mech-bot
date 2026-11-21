@@ -1,6 +1,7 @@
 """Mech Royale bot v2: laser sniper that keeps house bots at long range, camps the zone edge
 away from enemies, farms cubes early, and breaks line of sight when focused."""
-import math, random, sys, time
+import math, random, sys, time, os
+F = set(os.environ.get("FLAGS", "patrol,nohide").split(","))
 import mechfight as mf
 from geo import Map, AStar, DET
 
@@ -25,7 +26,7 @@ def ang(a, b):
 
 
 class Bot:
-    name = "comet-sniper"
+    name = "comet-patrol"
 
     def __init__(self, hello):
         self.cfg = hello['config']
@@ -280,7 +281,11 @@ class Bot:
                     act.pop('take')
         if obs.get('offer'):
             ch = obs['offer']['choices']
-            act['pick'] = min(range(len(ch)), key=lambda i: UPG_ORDER.index(ch[i]['id']) if ch[i]['id'] in UPG_ORDER else 99)
+            if 'pcupg' in F:
+                ch2 = ["laser_charge", "laser_damage", "plating", "armor", "nanites", "gun_damage", "gun_rate"]
+                act['pick'] = min(range(len(ch)), key=lambda i: ch2.index(ch[i]['id']) if ch[i]['id'] in ch2 else 99)
+            if 'pick' not in act:
+                act['pick'] = min(range(len(ch)), key=lambda i: UPG_ORDER.index(ch[i]['id']) if ch[i]['id'] in UPG_ORDER else 99)
 
         # ---------------- zone
         nc, nr = z['next_center'], z['next_radius']
@@ -301,6 +306,8 @@ class Bot:
         # ---------------- focus / cover
         focus = [i for i, tt in self.attackers.items() if i < 100 and t - tt < 6]
         seers = [e for e in enemies if e['id'] in focus and self.m.los((e['pos'][0], e['pos'][1], e['pos'][2] + 8), eye_me)]
+        if 'nohide' in F:
+            seers = []
         if len(seers) >= 2 or (wounded and len(seers) >= 1 and me['hp'] < 0.35 * me['max_hp']):
             if self.hiding_since is None:
                 self.hiding_since = t
@@ -325,6 +332,9 @@ class Bot:
             if time.perf_counter() - t0 < 0.01 or DET:
                 self.camp = self.pick_camp(obs, me, self.enemy_seen); self.camp_key = zk; self.camp_t = t
         goal = self.camp
+        if 'patrol' in F:
+            a_ = self.phase + t * 0.043
+            goal = (nc[0] + math.cos(a_) * nr * 0.52, nc[1] + math.sin(a_) * nr * 0.52)
         stop_r = min(3.0, max(0.5, nr * 0.2))
         if urgent:
             goal = self.camp if d2(self.camp, nc) < nr else nc
