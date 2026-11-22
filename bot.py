@@ -1,7 +1,7 @@
 """Mech Royale bot v2: laser sniper that keeps house bots at long range, camps the zone edge
 away from enemies, farms cubes early, and breaks line of sight when focused."""
 import math, random, sys, time, os
-F = set(os.environ.get("FLAGS", "patrol,nohide,zfix,dodge,strafe").split(","))
+F = set(os.environ.get("FLAGS", "patrol,nohide,zfix,dodge").split(","))
 E = lambda k, d: float(os.environ.get(k, d))
 SW = E("SW", 2.5); STR_R = E("STR_R", 160); PFRAC = E("PFRAC", 0.85); PSPD = E("PSPD", 0.043); FARMT = E("FARMT", 150); FARMC = E("FARMC", 6); TRL = E("TRL", 220); TRN = E("TRN", 180); NL = E("NL", 150); NN = E("NN", 105); KW = E("KW", 1.0); WOUND = E("WOUND", 0.62); AVR = E("AVR", 130); AVW = E("AVW", 0.8)
 import mechfight as mf
@@ -28,12 +28,14 @@ def ang(a, b):
 
 
 class Bot:
-    name = "comet-v9a"
+    name = "comet-v6r"
 
     def __init__(self, hello):
         self.cfg = hello['config']
         self.id = hello['slot']
-        self.rng = random.Random(hello.get('seed', 0) + int(E('SALT', 0)) * 7919)
+        _salt = os.environ.get('SALT')
+        salt = int(_salt) if _salt else (0 if DET else int.from_bytes(os.urandom(4), 'little'))
+        self.rng = random.Random(hello.get('seed', 0) + salt * 7919)
         self.phase = self.rng.uniform(-math.pi, math.pi)
         self.m = Map()
         self.attackers = {}
