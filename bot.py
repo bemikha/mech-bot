@@ -1,9 +1,9 @@
 """Mech Royale bot v2: laser sniper that keeps house bots at long range, camps the zone edge
 away from enemies, farms cubes early, and breaks line of sight when focused."""
 import math, random, sys, time, os
-F = set(os.environ.get("FLAGS", "patrol,nohide,zfix").split(","))
+F = set(os.environ.get("FLAGS", "patrol,nohide,zfix,dodge,strafe").split(","))
 E = lambda k, d: float(os.environ.get(k, d))
-PFRAC = E("PFRAC", 0.52); PSPD = E("PSPD", 0.043); FARMT = E("FARMT", 150); FARMC = E("FARMC", 6); TRL = E("TRL", 220); TRN = E("TRN", 180); NL = E("NL", 150); NN = E("NN", 105); KW = E("KW", 1.0); WOUND = E("WOUND", 0.62); AVR = E("AVR", 130); AVW = E("AVW", 0.8)
+SW = E("SW", 2.5); STR_R = E("STR_R", 160); PFRAC = E("PFRAC", 0.85); PSPD = E("PSPD", 0.043); FARMT = E("FARMT", 150); FARMC = E("FARMC", 6); TRL = E("TRL", 220); TRN = E("TRN", 180); NL = E("NL", 150); NN = E("NN", 105); KW = E("KW", 1.0); WOUND = E("WOUND", 0.62); AVR = E("AVR", 130); AVW = E("AVW", 0.8)
 import mechfight as mf
 from geo import Map, AStar, DET
 
@@ -28,12 +28,12 @@ def ang(a, b):
 
 
 class Bot:
-    name = "comet-v4"
+    name = "comet-v9a"
 
     def __init__(self, hello):
         self.cfg = hello['config']
         self.id = hello['slot']
-        self.rng = random.Random(hello.get('seed', 0))
+        self.rng = random.Random(hello.get('seed', 0) + int(E('SALT', 0)) * 7919)
         self.phase = self.rng.uniform(-math.pi, math.pi)
         self.m = Map()
         self.attackers = {}
@@ -268,6 +268,8 @@ class Bot:
         def want(kind):
             if kind in kinds or kind == 'gun':
                 return False
+            if kind == 'mortar' and 'nomortar' in F:
+                return False
             return free_slot or RANK[kind] > held_best
         loot = [p for p in obs['pickups'] if want(p['kind']) and t - self.failed.get(p['id'], -99) > 2]
         reach = [p for p in loot if d2(pos, p['pos']) <= self.cfg['loot']['pickup_radius'] - 0.2 and abs(pz - p['pos'][2]) <= 3.9]
@@ -360,6 +362,10 @@ class Bot:
                 if d2(p, z['center']) < z['radius'] - 5 and self.reachable_item(p):
                     opps.append((d2(pos, p) - value, p, sr))
             room = not nearby or (opening and d2(pos, nearby[0]['pos']) > 76 and t - self.dmg_t > 5)
+            if 'drop' in F and me['hp'] < 0.8 * me['max_hp']:
+                for dr in obs.get('drops', []):
+                    if dr['lands_in'] < 5 + d2(pos, dr['pos']) / st.get('walk_speed', 11.7):
+                        consider(dr, 240 if me['hp'] < 0.5 * me['max_hp'] else 160, dr['radius'] * 0.65)
             if room or farm_window:
                 for dr in obs.get('drops', []):
                     if dr['lands_in'] < 5 + d2(pos, dr['pos']) / st.get('walk_speed', 11.7):
@@ -427,10 +433,32 @@ class Bot:
                     pressure.append((ang(pos, e['pos']), AVW * (1 - d / AVR)))
         best = -1e9; heading = wanted
         side = 1 if math.sin(self.phase + t * 1.6) >= 0 else -1
+        lasers_on_us = []
+        if 'dodge' in F:
+            for e in enemies:
+                if e.get('charging') and d2(pos, e['pos']) < 280:
+                    to_us = ang(e['pos'], pos)
+                    if abs(wrap(e['aim'][0] - to_us)) < max(0.06, math.atan2(6.0, max(1.0, d2(pos, e['pos'])))):
+                        lasers_on_us.append(ang(pos, e['pos']))
+        shooters = []
+        if 'strafe' in F and not urgent:
+            for e in enemies:
+                de = d2(pos, e['pos'])
+                if de > STR_R:
+                    continue
+                to_us = ang(e['pos'], pos)
+                if t - self.attackers.get(e['id'], -99) < 3 or abs(wrap(e['aim'][0] - to_us)) < 0.3:
+                    shooters.append((de, ang(pos, e['pos'])))
+            shooters.sort()
         for i in range(16):
             th = wanted + i * TAU / 16
             dx, dy = math.cos(th), math.sin(th)
             s = math.cos(th - wanted) * (3.8 if (urgent or hiding) else 1.25)
+            for k_, (de, sb) in enumerate(shooters[:2]):
+                s += SW * (1.0 if k_ == 0 else 0.5) * abs(math.sin(th - sb))
+                s += 0.8 * side * math.sin(th - sb)
+            for lb in lasers_on_us:
+                s += 2.5 * abs(math.sin(th - lb))  # move across the beam line
             if 'zfix' in F and not me['in_zone']:
                 s += math.cos(th - ang(pos, cc)) * 6.0
             s += 0.28 * math.cos(th - self.heading)
@@ -468,7 +496,8 @@ class Bot:
         rush = opening and not nearby and stop_r > 0 and gd > 22
         chase = finishing and tdist > (38 if lig_i is not None else 50)
         kite = sniping and can_sprint and any(d2(pos, e['pos']) < 95 for e in nearby) and me['energy'] > 25
-        act['boost'] = bool(jet or kite or (can_sprint and (((urgent or hiding or (nearby and wounded)) and me['energy'] > 30)
+        sboost = 'sboost' in F and shooters and shooters[0][0] < 110 and can_sprint and me['energy'] > 35
+        act['boost'] = bool(jet or kite or sboost or (lasers_on_us and can_sprint and me['energy'] > 15) or (can_sprint and (((urgent or hiding or (nearby and wounded)) and me['energy'] > 30)
                                                        or ((rush or chase or laser_run) and me['energy'] > 66))))
 
         # ---------------- aim & fire
