@@ -1,13 +1,16 @@
 """Mech Royale bot v2: laser sniper that keeps house bots at long range, camps the zone edge
 away from enemies, farms cubes early, and breaks line of sight when focused."""
 import math, random, sys, time, os
-F = set(os.environ.get("FLAGS", "patrol,nohide,zfix,dodge").split(","))
+F = set(os.environ.get("FLAGS", "patrol,nohide,zfix,dodge,cstep,sticky,lethal,nomortar,drop3,upg2,lose").split(","))
 E = lambda k, d: float(os.environ.get(k, d))
 SW = E("SW", 2.5); STR_R = E("STR_R", 160); PFRAC = E("PFRAC", 0.85); PSPD = E("PSPD", 0.043); FARMT = E("FARMT", 150); FARMC = E("FARMC", 6); TRL = E("TRL", 220); TRN = E("TRN", 180); NL = E("NL", 150); NN = E("NN", 105); KW = E("KW", 1.0); WOUND = E("WOUND", 0.62); AVR = E("AVR", 130); AVW = E("AVW", 0.8)
 import mechfight as mf
 from geo import Map, AStar, DET
 
 TAU = 2 * math.pi
+UPG2 = ['plating', 'armor', 'nanites', 'servos', 'jets', 'laser_damage', 'laser_charge', 'reactor', 'gun_damage', 'gun_rate',
+        'lightning_efficiency', 'lightning_range', 'gun_mag', 'gun_velocity', 'capacitor', 'gyros', 'lightning_chain', 'sensors',
+        'laser_pierce', 'mortar_reload', 'mortar_splash', 'mortar_velocity']
 UPG_ORDER = ['plating', 'armor', 'nanites', 'laser_charge', 'laser_damage', 'gun_damage', 'gun_rate',
              'lightning_efficiency', 'lightning_range', 'gun_mag', 'servos', 'lightning_chain', 'gyros',
              'gun_velocity', 'reactor', 'capacitor', 'jets', 'sensors', 'mortar_reload', 'mortar_splash',
@@ -28,7 +31,7 @@ def ang(a, b):
 
 
 class Bot:
-    name = "comet-v6r"
+    name = "comet-v12"
 
     def __init__(self, hello):
         self.cfg = hello['config']
@@ -49,6 +52,7 @@ class Bot:
         self.anchor = None; self.anchor_t = 0; self.jet_until = -1
         self.heading = self.phase
         self.full_since = None
+        self.lose_eyes = []; self.strafe = 1; self.strafe_until = -1; self.stick_t = -99; self.lose_at = -99
         self.cover = None; self.cover_t = -99; self.hiding_since = None
         self.kills_at = []
         self.mode = ''
@@ -194,7 +198,17 @@ class Bot:
         for e in cand[:7]:
             d = d2(pos, e['pos']); _, h = self.size(e); p = e['pos']
             if self.m.los(muzzle, (p[0], p[1], p[2] + h * 0.52)):
-                pr = 0.58 * d + 0.072 * e.get('hp', 1400) - 14 * (e['id'] == self.target_id) - 30 * (t - self.attackers.get(e['id'], -99) < 3)
+                if 'sticky' in F:
+                    hp_ = e.get('hp', 1400); mhp = e.get('max_hp', 1400) or 1400
+                    pr = d + 0.2 * hp_
+                    if hp_ <= 0.3 * mhp: pr -= 100
+                    if e['id'] == self.target_id and t - self.stick_t < 2: pr -= 60
+                    if t - self.attackers.get(e['id'], -99) < 4: pr -= 40
+                    if abs(wrap(ang(e['pos'], pos) - e['aim'][0])) > math.pi / 2 + 0.17: pr -= 40
+                    vx, vy = e['vel'][0] - me['vel'][0], e['vel'][1] - me['vel'][1]
+                    if d > 1 and -(vx * (e['pos'][0] - pos[0]) + vy * (e['pos'][1] - pos[1])) / d > 3: pr -= 15
+                else:
+                    pr = 0.58 * d + 0.072 * e.get('hp', 1400) - 14 * (e['id'] == self.target_id) - 30 * (t - self.attackers.get(e['id'], -99) < 3)
                 vis.append((pr, e))
         if vis:
             return min(vis, key=lambda v: v[0])[1]
@@ -209,6 +223,58 @@ class Bot:
             if self.m.los(muzzle, (p[0], p[1], p[2] + h * 0.52)):
                 return it
         return cand[0] if cand else None
+
+    def combat_step(self, me, target, enemies, cc, cr, want, aggr, cubes, t):
+        m = self.m; px, py, pz = me['pos']; st = me['stats']
+        if t >= self.strafe_until:
+            if self.rng.random() < 0.6:
+                self.strafe = -self.strafe
+            self.strafe_until = t + 0.3 + 0.7 * self.rng.random()
+        tp = target['pos']; _, th = self.size(target)
+        tc = (tp[0], tp[1], tp[2] + th * 0.5)
+        dx, dy = tp[0] - px, tp[1] - py; dd = math.hypot(dx, dy) or 1.0
+        sx, sy = -dy / dd * self.strafe, dx / dd * self.strafe
+        mh = st.get('muzzle_height', 7); hb = st.get('height', 9) * 0.6
+        foes = sorted((e for e in enemies if e['id'] != target['id'] and d2(e['pos'], (px, py)) < 190),
+                      key=lambda e: d2(e['pos'], (px, py)))[:3]
+        cube = None
+        for c in cubes:
+            cd = d2(c['pos'], (px, py))
+            if cd < 40 and abs(c['pos'][2] - pz) < 4 and (cube is None or cd < d2(cube['pos'], (px, py))):
+                cube = c
+        best = -1e18; bx = by = 0.0; blocked_side = False
+        for k in range(-1, 16):
+            if k < 0:
+                qx, qy, r, cx, cy = px, py, 0.0, 0.0, 0.0
+            else:
+                a = k * TAU / 16; cx, cy = math.cos(a), math.sin(a); r = 6.0
+                qx, qy = px + cx * r, py + cy * r
+                if not m.walk_line((px, py), (qx, qy)):
+                    if sx * cx + sy * cy > 0.9:
+                        blocked_side = True
+                    continue
+            gz = m.ground(qx, qy) if k >= 0 else pz
+            td = math.hypot(tp[0] - qx, tp[1] - qy)
+            sc = -1.1 * abs(td - want) - 0.4 * r
+            if m.los((qx, qy, gz + mh), tc):
+                sc += 45 * aggr
+            for f in foes:
+                if d2(f['pos'], (qx, qy)) < 170 and m.los((f['pos'][0], f['pos'][1], f['pos'][2] + 8), (qx, qy, gz + hb)):
+                    sc -= 30
+            dz = math.hypot(qx - cc[0], qy - cc[1]) - cr
+            if dz > -5:
+                sc -= 150 + (dz + 5) * 5
+            if cube is not None:
+                sc += 1.5 * (d2(cube['pos'], (px, py)) - d2(cube['pos'], (qx, qy)))
+            if aggr > 0:
+                sc += 9 * (sx * cx + sy * cy)
+            if k < 0:
+                sc -= 8
+            if sc > best:
+                best, bx, by = sc, cx, cy
+        if blocked_side:
+            self.strafe = -self.strafe; self.strafe_until = t + 0.5
+        return bx, by
 
     def incoming(self, obs, pos, st):
         out = []
@@ -291,7 +357,8 @@ class Bot:
                 ch2 = ["laser_charge", "laser_damage", "plating", "armor", "nanites", "gun_damage", "gun_rate"]
                 act['pick'] = min(range(len(ch)), key=lambda i: ch2.index(ch[i]['id']) if ch[i]['id'] in ch2 else 99)
             if 'pick' not in act:
-                act['pick'] = min(range(len(ch)), key=lambda i: UPG_ORDER.index(ch[i]['id']) if ch[i]['id'] in UPG_ORDER else 99)
+                order = UPG2 if 'upg2' in F else UPG_ORDER
+                act['pick'] = min(range(len(ch)), key=lambda i: order.index(ch[i]['id']) if ch[i]['id'] in order else 99)
 
         # ---------------- zone
         nc, nr = z['next_center'], z['next_radius']
@@ -320,11 +387,23 @@ class Bot:
         if self.hiding_since is not None and (me['hp'] >= 0.85 * me['max_hp'] or t - self.hiding_since > 40 or urgent):
             self.hiding_since = None; self.cover = None
         hiding = self.hiding_since is not None
+        lose_hide = False
+        if 'lose' in F:
+            close = [e for e in enemies if d2(pos, e['pos']) < 160]
+            hpr = me['hp'] / max(1, me['max_hp'])
+            lose = (len(close) >= 2 and hpr < 0.55) or (len(close) >= 3 and hpr < 0.8)
+            if lose:
+                self.lose_at = t
+            if t - self.lose_at < 1.5 and not urgent and not hiding:
+                hiding = True; lose_hide = True
+                self.lose_eyes = [(e['pos'][0], e['pos'][1], e['pos'][2] + 8) for e in sorted(close, key=lambda e: d2(pos, e['pos']))[:4]]
 
         # ---------------- target
         target = self.choose_target(obs, me, enemies, muzzle, wounded, urgent, sniping)
         if target:
             self.target_id = target['id']
+            if target.get('kind') == 'mech':
+                self.stick_t = t
         tkind = target.get('kind', 'crate') if target else None
         tdist = d2(pos, target['pos']) if target else 1e9
         finishing = tkind == 'mech' and not wounded and len(nearby) <= 1 and tdist < 95 and target.get('hp', 1e9) < me['hp'] * 0.43
@@ -351,7 +430,8 @@ class Bot:
         elif hiding:
             if self.cover is None or t - self.cover_t > 1.5:
                 eyes = [(e['pos'][0], e['pos'][1], e['pos'][2] + 8) for e in seers] or \
-                       [(e['pos'][0], e['pos'][1], e['pos'][2] + 8) for e in enemies if e['id'] in focus]
+                       [(e['pos'][0], e['pos'][1], e['pos'][2] + 8) for e in enemies if e['id'] in focus] or \
+                       (self.lose_eyes if lose_hide else [])
                 if eyes:
                     self.cover = self.find_cover(me, eyes, cc, cr) or self.cover
                 self.cover_t = t
@@ -364,6 +444,14 @@ class Bot:
                 if d2(p, z['center']) < z['radius'] - 5 and self.reachable_item(p):
                     opps.append((d2(pos, p) - value, p, sr))
             room = not nearby or (opening and d2(pos, nearby[0]['pos']) > 76 and t - self.dmg_t > 5)
+            if 'drop3' in F:
+                for dr in obs.get('drops', []):
+                    hold = dr.get('holder')
+                    if hold is not None and hold != self.id:
+                        continue
+                    eta = d2(pos, dr['pos']) * 1.4 / st.get('walk_speed', 11.7)
+                    if dr['lands_in'] <= eta + 3:
+                        consider(dr, 300, dr['radius'] * 0.6)
             if 'drop' in F and me['hp'] < 0.8 * me['max_hp']:
                 for dr in obs.get('drops', []):
                     if dr['lands_in'] < 5 + d2(pos, dr['pos']) / st.get('walk_speed', 11.7):
@@ -486,6 +574,23 @@ class Bot:
         gd = d2(pos, goal) if goal is not None else 0
         stop = goal is not None and gd < stop_r and (not nearby or nr < 4)
         act['move'] = [0.0, 0.0] if stop else [math.cos(heading), math.sin(heading)]
+        fighting = False
+        if ('cstep' in F and target is not None and tkind == 'mech' and not urgent and not hiding and not lasers_on_us
+                and tdist < 240 and self.m.los(muzzle, (target['pos'][0], target['pos'][1], target['pos'][2] + self.size(target)[1] * 0.5))):
+            if lig_i is not None and me['energy'] > 12:
+                want = 28.0
+            elif sniping:
+                want = 120.0
+            else:
+                want = 85.0
+            if lig_i is None:
+                if 'lightning' in target.get('weapons', []): want = max(want, 64.0)
+                if 'mortar' in target.get('weapons', []): want = max(want, 80.0)
+            gun_ready = gun_i is not None and ws[gun_i].get('ammo', 0) > 0 and ws[gun_i].get('reload', 0) <= 0.25 and tdist <= ws[gun_i]['stats'].get('range', 230) - 10
+            armed = gun_ready or sniping or lig_i is not None
+            cx, cy = self.combat_step(me, target, enemies, cc, cr, want, 1.0 if armed else -1.0, obs['cubes'], t)
+            act['move'] = [cx, cy]
+            fighting = True
         # unstick
         if self.anchor is None or t - self.anchor_t >= 1.2:
             if self.anchor and d2(pos, self.anchor) < 2 and not stop and me['energy'] > 28:
@@ -495,11 +600,14 @@ class Bot:
         if jet and me['grounded']:
             act['jump'] = True
         can_sprint = not stop and me['grounded']
+        if fighting and act['move'] == [0.0, 0.0]:
+            can_sprint = False
         rush = opening and not nearby and stop_r > 0 and gd > 22
         chase = finishing and tdist > (38 if lig_i is not None else 50)
         kite = sniping and can_sprint and any(d2(pos, e['pos']) < 95 for e in nearby) and me['energy'] > 25
         sboost = 'sboost' in F and shooters and shooters[0][0] < 110 and can_sprint and me['energy'] > 35
-        act['boost'] = bool(jet or kite or sboost or (lasers_on_us and can_sprint and me['energy'] > 15) or (can_sprint and (((urgent or hiding or (nearby and wounded)) and me['energy'] > 30)
+        fboost = fighting and can_sprint and tdist > 30 and me['energy'] > 40
+        act['boost'] = bool(jet or kite or sboost or fboost or (lasers_on_us and can_sprint and me['energy'] > 15) or (can_sprint and (((urgent or hiding or (nearby and wounded)) and me['energy'] > 30)
                                                        or ((rush or chase or laser_run) and me['energy'] > 66))))
 
         # ---------------- aim & fire
@@ -525,7 +633,7 @@ class Bot:
             clear = self.m.los(muzzle, (px + x, py + y, az))
             breathing = d > 70 and t - self.dmg_t > 2.3 and t - self.last_hit_t > 1.4
             engage = not (wounded and tkind == 'mech' and breathing and obs['alive'] > 2 and target.get('hp', 1e9) > 150)
-            if hiding and d > 40 and tkind == 'mech':
+            if hiding and not lose_hide and d > 40 and tkind == 'mech':
                 engage = False
             if gun is not None and gun.get('reload', 0) <= 0:
                 fire[gun_i] = clear and aligned and engage and d < gun['stats'].get('range', 230)
@@ -538,8 +646,19 @@ class Bot:
                     self.full_since = None
                 tight = ye < math.atan2(wdt * 0.55, d) + 0.003 and pe < math.atan2(hgt * 0.35, d) + 0.004
                 overdue = self.full_since is not None and t - self.full_since > 1.6
+                lethal_rel = False
+                if 'lethal' in F and charging and not full and tkind == 'mech':
+                    ls_ = w['stats']; ch_ = w.get('charge', 0)
+                    if ch_ >= ls_.get('min_charge', 0.15):
+                        mf_ = ls_.get('min_frac', 0.35)
+                        dmg_ = (mf_ + (1 - mf_) * ch_ / max(1e-6, ls_.get('charge', 0.75))) * ls_.get('damage', 315) * (1 + 0.04 * min(me['cubes'], 10))
+                        if 'mortar' in target.get('weapons', []):
+                            dmg_ *= 1 + ls_.get('cookoff', 0.6)
+                        if abs(wrap(ang(target['pos'], pos) - target['aim'][0])) > math.pi / 2 + 0.17:
+                            dmg_ *= 1.5
+                        lethal_rel = 0.8 * dmg_ >= target.get('hp', 1e9) and tight
                 if charging:
-                    fire[laser_i] = not (clear and full and (tight or overdue))
+                    fire[laser_i] = not (clear and ((full and (tight or overdue)) or lethal_rel))
                 else:
                     fire[laser_i] = clear and ye < 0.35
                 if gun is not None:
